@@ -79,12 +79,15 @@ class Agent {
   async evaluate(message) {
     if (this.isProcessing) return;
     this.isProcessing = true;
+    
+    // Determine if this is a proactive message (no user message)
+    const isProactive = !message;
 
     try {
       const response = await queueCall(() => this.think(message));
       
       if (response && response.should_reply && response.messages && response.messages.length > 0) {
-        await this.sendResponse(response.messages.join(' '), response.emotion_after);
+        await this.sendResponse(response.messages.join(' '), response.emotion_after, isProactive);
       } else if (response && response.emotion_after) {
         await this.mm.updateSelf('mood', response.emotion_after);
       }
@@ -138,25 +141,37 @@ class Agent {
     }
   }
 
-  async sendResponse(text, emotionAfter) {
+  async sendResponse(text, emotionAfter, isProactive = false) {
     const now = Date.now();
     if (now - this.lastMessageTime < 2000) return;
 
+    const timestamp = new Date().toISOString();
+    
     await this.mm.storeRawMessage({
       author: this.name,
       content: text,
-      timestamp: new Date().toISOString()
+      timestamp: timestamp
     });
 
     this.sharedFeed.push({
       author: this.name,
       content: text,
-      timestamp: new Date().toISOString()
+      timestamp: timestamp
     });
 
     console.log();
     console.log(this.color(`${this.name}: ${text}`));
     console.log();
+
+    // Broadcast to SSE for Discord relay (both reactive AND proactive)
+    if (this.eventBus) {
+      this.eventBus.emit('agentMessage', {
+        agent: this.name,
+        messages: text.split(' ').filter(m => m),
+        timestamp: timestamp,
+        proactive: isProactive
+      });
+    }
 
     if (emotionAfter) {
       await this.mm.updateSelf('mood', emotionAfter);

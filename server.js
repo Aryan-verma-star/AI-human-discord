@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const { EventEmitter } = require('events');
 const AgentManager = require('./agentManager');
 
 const app = express();
@@ -9,6 +10,9 @@ const PORT = process.env.PORT || 7860;
 const TIMEOUT = parseInt(process.env.AGENT_TIMEOUT || '20');
 const SILENT_MODE = process.env.SILENT_MODE === 'true';
 
+// Event emitter for agent messages
+const agentEventBus = new EventEmitter();
+
 if (SILENT_MODE) {
   console.log = () => {};
   console.error = () => {};
@@ -16,10 +20,8 @@ if (SILENT_MODE) {
 
 let agentManager = null;
 let startTime = Date.now();
-
-// SSE: Connected clients
-let sseClients = [];
 let messageIdCounter = 0;
+let sseClients = [];
 
 function broadcastAgentMessage(agentMessage) {
   const id = ++messageIdCounter;
@@ -34,62 +36,29 @@ function broadcastAgentMessage(agentMessage) {
   for (const client of sseClients) {
     client.write(`id: ${id}\ndata: ${eventData}\n\n`);
   }
+  
+  // Log broadcast (unless SILENT_MODE)
+  const type = agentMessage.proactive ? '🔔 PROACTIVE' : '💬 REACTIVE';
+  console.log(`[SSE BROADCAST] ${type} ${agentMessage.agent}: ${agentMessage.messages.join(' ').substring(0, 50)}...`);
 }
+
+// Listen for agent events from agent.js
+agentEventBus.on('agentMessage', (msg) => {
+  broadcastAgentMessage(msg);
+});
 
 async function initialize() {
   if (!SILENT_MODE) console.log('=== Initializing Agent HTTP Server ===');
   agentManager = new AgentManager();
   await agentManager.initialize();
-  if (!SILENT_MODE) console.log('=== All agents ready ===');
-}
-
-const originalSendResponse = async function(text, emotionAfter, isProactive = false) {
-  const now = Date.now();
-  if (now - this.lastMessageTime < 2000) return;
   
-  const response = {
-    agent: this.name,
-    messages: text.split(' ').filter(m => m),
-    should_reply: true,
-    emotion_after: emotionAfter,
-    proactive: isProactive
-  };
-  
-  if (!global._currentResponse) global._currentResponse = [];
-  global._currentResponse.push(response);
-  
-  await this.mm.storeRawMessage({
-    author: this.name,
-    content: text,
-    timestamp: new Date().toISOString()
-  });
-  
-  this.sharedFeed.push({
-    author: this.name,
-    content: text,
-    timestamp: new Date().toISOString()
-  });
-  
-  if (!SILENT_MODE) console.log(`  ${this.name}: ${text}`);
-  
-  // Broadcast to SSE in REAL-TIME
-  broadcastAgentMessage({
-    agent: this.name,
-    messages: text.split(' ').filter(m => m),
-    timestamp: new Date().toISOString(),
-    proactive: isProactive
-  });
-  
-  if (emotionAfter) {
-    await this.mm.updateSelf('mood', emotionAfter);
+  // Inject event bus into all agents
+  for (const agent of agentManager.agents) {
+    agent.eventBus = agentEventBus;
   }
   
-  this.lastMessageTime = Date.now();
-  this.lastActivityTime = Date.now();
-  this.messageCountSinceReflection++;
-  
-  return new Promise(resolve => setTimeout(resolve, 2500));
-};
+  if (!SILENT_MODE) console.log('=== All agents ready ===');
+}
 
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -138,10 +107,6 @@ app.post('/chat', async (req, res) => {
   
   global._currentResponse = [];
   
-  for (const agent of agentManager.agents) {
-    agent.sendResponse = (text, emotion) => originalSendResponse.call(agent, text, emotion, false);
-  }
-  
   await agentManager.handleUserMessage(message);
   
   await new Promise(r => setTimeout(r, TIMEOUT * 1000));
@@ -165,4 +130,4 @@ process.on('SIGTERM', () => {
   server.close(() => process.exit(0));
 });
 
-module.exports = { app, agentManager, broadcastAgentMessage };
+module.exports = { app, agentManager, agentEventBus };
