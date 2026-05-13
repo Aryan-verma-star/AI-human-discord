@@ -1,19 +1,30 @@
 {
-  "name": "kiara-agent",
-  "version": "0.1.0",
-  "description": "Phase 0 - Kiara, a Hinglish AI agent with Qwen brain and Karpathy-style wiki memory",
+  "name": "hinglish-10-agent-chat",
+  "version": "1.0.0",
+  "description": "Phase 1-2: 10-agent Hinglish chat simulation with Discord relay",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "server": "node server.js",
+    "discord": "node discordRelay.js",
     "test": "echo \"Run manual tests with: node index.js\""
   },
-  "keywords": ["ai", "agent", "hinglish", "qwen", "chatbot"],
+  "keywords": [
+    "ai",
+    "agents",
+    "hinglish",
+    "qwen",
+    "discord",
+    "chatbot"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "axios": "^1.16.0",
     "chalk": "^4.1.2",
+    "discord.js": "^14.26.4",
     "dotenv": "^17.4.2",
+    "express": "^4.22.2",
     "fs-extra": "^11.3.5"
   }
 }
