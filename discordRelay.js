@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, WebhookClient } = require('discord.js');
+const { Client, GatewayIntentBits } = require('discord.js');
 const axios = require('axios');
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -8,8 +8,8 @@ const AGENT_API_URL = process.env.AGENT_API_URL;
 const HUMAN_USERNAMES = (process.env.HUMAN_USERNAMES || '').split(',').map(s => s.trim()).filter(Boolean);
 
 console.log('🔧 Discord Relay Starting...');
-console.log('📡 AGENT_API_URL:', AGENT_API_URL);
-console.log('👥 Human users:', HUMAN_USERNAMES);
+console.log('📡 API:', AGENT_API_URL);
+console.log('👥 Humans:', HUMAN_USERNAMES);
 
 const AGENT_WEBHOOKS = {
   'Aarohi': { name: 'Aarohi 🗿', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Aarohi' },
@@ -24,7 +24,7 @@ const AGENT_WEBHOOKS = {
   'Simran': { name: 'Simran 🤨', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Simran' }
 };
 
-let webhookClients = {};
+let webhookCache = {};
 
 const client = new Client({
   intents: [
@@ -34,38 +34,39 @@ const client = new Client({
   ]
 });
 
-async function createOrGetWebhooks(channel) {
-  console.log('⚙️ Creating webhooks...');
+async function getWebhook(channel, agentName) {
+  if (webhookCache[agentName]) return webhookCache[agentName];
+  
+  const config = AGENT_WEBHOOKS[agentName];
+  const webhooks = await channel.fetchWebhooks();
+  
+  let webhook = webhooks.find(w => w.name === config.name);
+  
+  if (!webhook) {
+    webhook = await channel.createWebhook({
+      name: config.name,
+      avatar: config.avatar
+    });
+  }
+  
+  webhookCache[agentName] = webhook;
+  return webhook;
+}
+
+async function sendMessage(webhook, agentName, text) {
+  const config = AGENT_WEBHOOKS[agentName];
   
   try {
-    const existingWebhooks = await channel.fetchWebhooks();
-    console.log(`📋 Found ${existingWebhooks.size} existing webhooks`);
-    
-    for (const [agentName, config] of Object.entries(AGENT_WEBHOOKS)) {
-      let webhook = existingWebhooks.find(w => w.name === config.name);
-      
-      if (!webhook) {
-        console.log(`➕ Creating ${agentName}...`);
-        webhook = await channel.createWebhook({
-          name: config.name,
-          avatar: config.avatar
-        });
-      } else {
-        console.log(`✅ Found ${agentName}`);
-      }
-      
-      webhookClients[agentName] = {
-        id: webhook.id,
-        token: webhook.token,
-        send: async (opts) => {
-          return await webhook.send(opts);
-        }
-      };
-    }
-    
-    console.log('✅ All webhooks ready!');
+    await webhook.send({
+      content: text,
+      username: config.name,
+      avatarURL: config.avatar
+    });
+    console.log(`✅ ${agentName}: ${text.substring(0, 40)}...`);
+    return true;
   } catch (error) {
-    console.error('❌ Webhook setup failed:', error.message);
+    console.error(`❌ ${agentName} failed:`, error.message);
+    return false;
   }
 }
 
@@ -73,76 +74,61 @@ async function forwardToAgents(message) {
   const username = message.author.username;
   const content = message.content;
   
-  console.log(`📥 ${username}: ${content}`);
+  console.log(`\n📥 ${username}: ${content}`);
   
   try {
-    console.log('📤 Sending to agent API...');
     const response = await axios.post(`${AGENT_API_URL}/chat`, {
       message: content,
       username: username
     }, { timeout: 60000 });
     
-    console.log('📬 Response received');
     const responses = response.data.responses || [];
     
     if (responses.length === 0) {
-      console.log('⚠️ No agent responses');
+      console.log('⚠️ No responses');
       return;
     }
     
-    console.log(`📬 ${responses.length} agent responses received`);
+    console.log(`📬 Got ${responses.length} responses, posting...\n`);
     
-    for (let i = 0; i < responses.length; i++) {
-      const resp = responses[i];
+    // Post each response one by one, waiting for each to succeed
+    for (const resp of responses) {
       const agentName = resp.agent;
       const messages = resp.messages;
       const msgText = messages.join(' ');
       
-      console.log(`  → ${agentName}: ${msgText.substring(0, 50)}`);
+      const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+      const webhook = await getWebhook(channel, agentName);
       
-      if (webhookClients[agentName]) {
-        try {
-          await webhookClients[agentName].send({
-            content: msgText,
-            username: AGENT_WEBHOOKS[agentName].name,
-            avatarURL: AGENT_WEBHOOKS[agentName].avatar
-          });
-          console.log(`✅ Posted ${agentName}`);
-        } catch (e) {
-          console.error(`❌ Failed ${agentName}:`, e.message);
-        }
-      } else {
-        console.log(`⚠️ No webhook for ${agentName}`);
-      }
+      // Wait for this message to be sent before next
+      await sendMessage(webhook, agentName, msgText);
       
-      await new Promise(r => setTimeout(r, 500));
+      // Wait 1 second before next agent
+      await new Promise(r => setTimeout(r, 1000));
     }
+    
+    console.log('\n✅ All messages relayed!\n');
     
   } catch (error) {
     console.error('❌ Error:', error.message);
-    if (error.response) {
-      console.error('Response:', error.response.data);
-    }
   }
 }
 
-async function pollPendingMessages() {
+async function pollPending() {
   try {
     const response = await axios.get(`${AGENT_API_URL}/pending`, { timeout: 5000 });
     const pending = response.data.responses || [];
     
-    for (const resp of pending) {
-      const agentName = resp.agent;
-      const messages = resp.messages;
-      const msgText = messages.join(' ');
+    if (pending.length > 0) {
+      console.log(`📤 Proactive: ${pending.length} messages`);
+      const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
       
-      if (webhookClients[agentName]) {
-        await webhookClients[agentName].send({
-          content: msgText,
-          username: AGENT_WEBHOOKS[agentName].name,
-          avatarURL: AGENT_WEBHOOKS[agentName].avatar
-        });
-        console.log(`📤 Proactive: ${agentName}`);
+      for (const resp of pending) {
+        const agentName = resp.agent;
+        const msgText = resp.messages.join(' ');
+        const webhook = await getWebhook(channel, agentName);
+        await sendMessage(webhook, agentName, msgText);
+        await new Promise(r => setTimeout(r, 1000));
       }
     }
   } catch (error) {
@@ -151,51 +137,34 @@ async function pollPendingMessages() {
 }
 
 client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`✅ Bot: ${client.user.tag}`);
   
   const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
-  if (!channel) {
-    console.error('❌ Channel not found! Check DISCORD_CHANNEL_ID');
-    return;
-  }
+  console.log(`📢 Channel: #${channel.name}`);
   
-  console.log(`📢 Monitoring: #${channel.name}`);
+  setInterval(pollPending, 5000);
   
-  await createOrGetWebhooks(channel);
-  
-  setInterval(pollPendingMessages, 5000);
-  
-  console.log('🚀 Discord relay online!');
+  console.log('🚀 Ready!\n');
 });
 
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (message.webhookId) return;
+  if (message.author.bot || message.webhookId) return;
   
   if (!HUMAN_USERNAMES.includes(message.author.username)) {
-    console.log(`👤 Ignoring ${message.author.username} (not in list)`);
     return;
   }
   
   await forwardToAgents(message);
 });
 
-client.on('error', (error) => {
-  console.error('❌ Discord error:', error.message);
-});
-
 if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID || !AGENT_API_URL) {
-  console.error('❌ Missing required env vars!');
-  console.error('DISCORD_BOT_TOKEN:', DISCORD_BOT_TOKEN ? 'set' : 'MISSING');
-  console.error('DISCORD_CHANNEL_ID:', DISCORD_CHANNEL_ID ? 'set' : 'MISSING');
-  console.error('AGENT_API_URL:', AGENT_API_URL ? 'set' : 'MISSING');
+  console.error('❌ Missing env vars!');
   process.exit(1);
 }
 
 client.login(DISCORD_BOT_TOKEN);
 
 process.on('SIGINT', () => {
-  console.log('👋 Shutting down...');
   client.destroy();
   process.exit(0);
 });
