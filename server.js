@@ -6,39 +6,36 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const TIMEOUT = parseInt(process.env.AGENT_TIMEOUT || '20');
+const TIMEOUT = parseInt(process.env.AGENT_TIMEOUT || '25');
 const SILENT_MODE = process.env.SILENT_MODE === 'true';
-
-if (SILENT_MODE) {
-  console.log = () => {};
-  console.error = () => {};
-}
 
 let agentManager = null;
 let startTime = Date.now();
 let proactiveQueue = [];
 
 async function initialize() {
-  if (!SILENT_MODE) console.log('=== Initializing Agent HTTP Server ===');
   agentManager = new AgentManager();
   await agentManager.initialize();
-  if (!SILENT_MODE) console.log('=== All agents ready ===');
 }
+
+let responseBuffer = [];
+let capturing = false;
 
 const originalSendResponse = async function(text, emotionAfter) {
   const now = Date.now();
-  if (now - this.lastMessageTime < 2000) return;
+  if (now - this.lastMessageTime < 1500) return;
   
   const response = {
     agent: this.name,
     messages: text.split(' ').filter(m => m),
     should_reply: true,
-    emotion_after: emotionAfter,
+    emotion_after: emotionAfter || 'neutral',
     proactive: false
   };
   
-  if (!global._currentResponse) global._currentResponse = [];
-  global._currentResponse.push(response);
+  if (capturing) {
+    responseBuffer.push(response);
+  }
   
   await this.mm.storeRawMessage({
     author: this.name,
@@ -52,25 +49,18 @@ const originalSendResponse = async function(text, emotionAfter) {
     timestamp: new Date().toISOString()
   });
   
-  if (!SILENT_MODE) console.log(`  ${this.name}: ${text}`);
-  
-  if (emotionAfter) {
-    await this.mm.updateSelf('mood', emotionAfter);
-  }
-  
   this.lastMessageTime = Date.now();
   this.lastActivityTime = Date.now();
   this.messageCountSinceReflection++;
   
-  return new Promise(resolve => setTimeout(resolve, 2500));
+  return new Promise(resolve => setTimeout(resolve, 1500));
 };
 
 app.get('/status', (req, res) => {
   res.json({
     online: true,
     agents: 10,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    proactiveQueue: proactiveQueue.length
+    uptime: Math.floor((Date.now() - startTime) / 1000)
   });
 });
 
@@ -93,16 +83,8 @@ app.post('/chat', async (req, res) => {
     return res.status(400).json({ error: 'Missing message or username' });
   }
   
-  const timestamp = new Date().toISOString();
-  if (!SILENT_MODE) console.log(`[${timestamp}] POST /chat - ${username}: ${message}`);
-  
-  const userMessage = {
-    author: username,
-    content: message,
-    timestamp: timestamp
-  };
-  
-  global._currentResponse = [];
+  responseBuffer = [];
+  capturing = true;
   
   for (const agent of agentManager.agents) {
     agent.sendResponse = originalSendResponse;
@@ -110,17 +92,12 @@ app.post('/chat', async (req, res) => {
   
   await agentManager.handleUserMessage(message);
   
-  const checkInterval = setInterval(() => {
-    const responses = global._currentResponse || [];
-    if (responses.length > 0) {
-      clearInterval(checkInterval);
-    }
-  }, 500);
-  
   await new Promise(r => setTimeout(r, TIMEOUT * 1000));
   
-  const responses = global._currentResponse || [];
-  global._currentResponse = [];
+  capturing = false;
+  
+  const responses = [...responseBuffer];
+  responseBuffer = [];
   
   if (proactiveQueue.length > 0) {
     for (const p of proactiveQueue) {
@@ -129,8 +106,6 @@ app.post('/chat', async (req, res) => {
     responses.push(...proactiveQueue);
     proactiveQueue = [];
   }
-  
-  if (!SILENT_MODE) console.log(`[${timestamp}] Response: ${responses.length} agents responded`);
   
   res.json({ responses });
 });
@@ -141,7 +116,6 @@ const server = app.listen(PORT, async () => {
 });
 
 process.on('SIGTERM', () => {
-  console.log('Shutting down...');
   if (agentManager) agentManager.cleanup();
   server.close(() => process.exit(0));
 });

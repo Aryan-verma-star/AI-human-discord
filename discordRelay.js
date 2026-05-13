@@ -80,7 +80,7 @@ async function forwardToAgents(message) {
     const response = await axios.post(`${AGENT_API_URL}/chat`, {
       message: content,
       username: username
-    }, { timeout: 30000 });
+    }, { timeout: 60000 });
     
     console.log('📬 Response received');
     const responses = response.data.responses || [];
