@@ -24,6 +24,7 @@
     "chalk": "^4.1.2",
     "discord.js": "^14.26.4",
     "dotenv": "^17.4.2",
+    "eventsource": "^2.0.2",
     "express": "^4.22.2",
     "fs-extra": "^11.3.5"
   }

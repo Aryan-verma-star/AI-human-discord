@@ -1,15 +1,12 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, WebhookClient } = require('discord.js');
 const axios = require('axios');
+const EventSource = require('eventsource');
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
-const AGENT_API_URL = process.env.AGENT_API_URL;
+const AGENT_API_URL = process.env.AGENT_API_URL || 'http://localhost:7860';
 const HUMAN_USERNAMES = (process.env.HUMAN_USERNAMES || '').split(',').map(s => s.trim()).filter(Boolean);
-
-console.log('🔧 Discord Relay Starting...');
-console.log('📡 API:', AGENT_API_URL);
-console.log('👥 Humans:', HUMAN_USERNAMES);
 
 const AGENT_WEBHOOKS = {
   'Aarohi': { name: 'Aarohi 🗿', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Aarohi' },
@@ -24,7 +21,9 @@ const AGENT_WEBHOOKS = {
   'Simran': { name: 'Simran 🤨', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Simran' }
 };
 
-let webhookCache = {};
+let webhookClients = {};
+let processedIds = new Set();
+const MAX_PROCESSED = 1000;
 
 const client = new Client({
   intents: [
@@ -34,53 +33,106 @@ const client = new Client({
   ]
 });
 
-async function getWebhook(channel, agentName) {
-  if (webhookCache[agentName]) return webhookCache[agentName];
-  
-  const config = AGENT_WEBHOOKS[agentName];
-  const webhooks = await channel.fetchWebhooks();
-  
-  let webhook = webhooks.find(w => w.name === config.name);
-  
-  if (!webhook) {
-    webhook = await channel.createWebhook({
-      name: config.name,
-      avatar: config.avatar
-    });
-  }
-  
-  webhookCache[agentName] = webhook;
-  return webhook;
-}
-
-async function sendMessage(webhook, agentName, text) {
-  const config = AGENT_WEBHOOKS[agentName];
+async function createOrGetWebhooks(channel) {
+  console.log('⚙️ Setting up webhooks...');
   
   try {
-    await webhook.send({
-      content: text,
-      username: config.name,
-      avatarURL: config.avatar
-    });
-    console.log(`✅ ${agentName}: ${text.substring(0, 40)}...`);
-    return true;
+    const existingWebhooks = await channel.fetchWebhooks().catch(() => []);
+    
+    for (const [agentName, config] of Object.entries(AGENT_WEBHOOKS)) {
+      let webhook = existingWebhooks.find(w => w.name === config.name);
+      
+      if (!webhook) {
+        console.log(`➕ Creating webhook for ${agentName}...`);
+        webhook = await channel.createWebhook({
+          name: config.name,
+          avatar: config.avatar
+        });
+      }
+      
+      webhookClients[agentName] = new WebhookClient({ id: webhook.id, token: webhook.token });
+      console.log(`✅ Webhook ready for ${agentName}`);
+    }
+    
+    console.log('✅ All webhooks ready!');
   } catch (error) {
-    console.error(`❌ ${agentName} failed:`, error.message);
+    console.error('❌ Webhook setup error:', error.message);
+  }
+}
+
+async function sendToDiscord(agentName, text) {
+  if (!webhookClients[agentName]) {
+    console.log(`❌ No webhook for ${agentName}`);
     return false;
   }
+  
+  try {
+    await webhookClients[agentName].send({
+      content: text,
+      username: AGENT_WEBHOOKS[agentName].name,
+      avatarURL: AGENT_WEBHOOKS[agentName].avatar
+    });
+    console.log(`📤 [${agentName}]: ${text.substring(0, 50)}...`);
+    return true;
+  } catch (error) {
+    console.error(`❌ ${agentName} post failed:`, error.message);
+    return false;
+  }
+}
+
+function connectSSE() {
+  console.log(`🔗 Connecting to SSE: ${AGENT_API_URL}/events`);
+  
+  const es = new EventSource(`${AGENT_API_URL}/events`);
+  
+  es.onopen = () => {
+    console.log('✅ SSE connected!');
+  };
+  
+  es.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      
+      if (processedIds.has(data.id)) {
+        return;
+      }
+      
+      processedIds.add(data.id);
+      if (processedIds.size > MAX_PROCESSED) {
+        const arr = Array.from(processedIds);
+        processedIds = new Set(arr.slice(-500));
+      }
+      
+      const msgText = data.messages.join(' ');
+      console.log(`📬 [SSE] ${data.agent}: ${msgText.substring(0, 50)}...`);
+      
+      sendToDiscord(data.agent, msgText);
+      
+    } catch (error) {
+      console.error('❌ SSE parse error:', error.message);
+    }
+  };
+  
+  es.onerror = (error) => {
+    console.error('❌ SSE error:', error);
+    console.log('🔄 Reconnecting in 5s...');
+    setTimeout(connectSSE, 5000);
+  };
+  
+  return es;
 }
 
 async function forwardToAgents(message) {
   const username = message.author.username;
   const content = message.content;
   
-  console.log(`\n📥 ${username}: ${content}`);
+  console.log(`📥 [User] ${username}: ${content}`);
   
   try {
     const response = await axios.post(`${AGENT_API_URL}/chat`, {
       message: content,
       username: username
-    }, { timeout: 60000 });
+    }, { timeout: 25000 });
     
     const responses = response.data.responses || [];
     
@@ -89,82 +141,51 @@ async function forwardToAgents(message) {
       return;
     }
     
-    console.log(`📬 Got ${responses.length} responses, posting...\n`);
-    
-    // Post each response one by one, waiting for each to succeed
-    for (const resp of responses) {
-      const agentName = resp.agent;
-      const messages = resp.messages;
-      const msgText = messages.join(' ');
-      
-      const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
-      const webhook = await getWebhook(channel, agentName);
-      
-      // Wait for this message to be sent before next
-      await sendMessage(webhook, agentName, msgText);
-      
-      // Wait 1 second before next agent
-      await new Promise(r => setTimeout(r, 1000));
-    }
-    
-    console.log('\n✅ All messages relayed!\n');
+    console.log(`📬 Got ${responses.length} responses via /chat`);
     
   } catch (error) {
-    console.error('❌ Error:', error.message);
-  }
-}
-
-async function pollPending() {
-  try {
-    const response = await axios.get(`${AGENT_API_URL}/pending`, { timeout: 5000 });
-    const pending = response.data.responses || [];
-    
-    if (pending.length > 0) {
-      console.log(`📤 Proactive: ${pending.length} messages`);
-      const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
-      
-      for (const resp of pending) {
-        const agentName = resp.agent;
-        const msgText = resp.messages.join(' ');
-        const webhook = await getWebhook(channel, agentName);
-        await sendMessage(webhook, agentName, msgText);
-        await new Promise(r => setTimeout(r, 1000));
-      }
-    }
-  } catch (error) {
-    // Silent
+    console.error('❌ /chat error:', error.message);
   }
 }
 
 client.once('ready', async () => {
-  console.log(`✅ Bot: ${client.user.tag}`);
+  console.log(`🤖 Logged in as ${client.user.tag}`);
   
   const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
-  console.log(`📢 Channel: #${channel.name}`);
+  if (!channel) {
+    console.error('❌ Channel not found!');
+    return;
+  }
   
-  setInterval(pollPending, 5000);
+  console.log(`📢 Monitoring: #${channel.name}`);
   
-  console.log('🚀 Ready!\n');
+  await createOrGetWebhooks(channel);
+  
+  connectSSE();
+  
+  console.log('🚀 Discord relay online!');
 });
 
 client.on('messageCreate', async (message) => {
-  if (message.author.bot || message.webhookId) return;
+  if (message.author.bot) return;
+  if (message.webhookId) return;
   
   if (!HUMAN_USERNAMES.includes(message.author.username)) {
+    console.log(`👤 Ignoring ${message.author.username} (not in human list)`);
     return;
   }
   
   await forwardToAgents(message);
 });
 
-if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID || !AGENT_API_URL) {
-  console.error('❌ Missing env vars!');
-  process.exit(1);
-}
+client.on('error', (error) => {
+  console.error('❌ Discord error:', error.message);
+});
 
 client.login(DISCORD_BOT_TOKEN);
 
 process.on('SIGINT', () => {
+  console.log('👋 Shutting down...');
   client.destroy();
   process.exit(0);
 });
