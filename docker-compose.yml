@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  agent-server:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - QWEN_API_URL=${QWEN_API_URL}
+      - QWEN_TOKEN=${QWEN_TOKEN}
+      - PORT=3000
+      - AGENT_TIMEOUT=20
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
