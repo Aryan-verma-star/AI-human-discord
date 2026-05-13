@@ -7,16 +7,22 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const TIMEOUT = parseInt(process.env.AGENT_TIMEOUT || '20');
+const SILENT_MODE = process.env.SILENT_MODE === 'true';
+
+if (SILENT_MODE) {
+  console.log = () => {};
+  console.error = () => {};
+}
 
 let agentManager = null;
 let startTime = Date.now();
 let proactiveQueue = [];
 
 async function initialize() {
-  console.log('=== Initializing Agent HTTP Server ===');
+  if (!SILENT_MODE) console.log('=== Initializing Agent HTTP Server ===');
   agentManager = new AgentManager();
   await agentManager.initialize();
-  console.log('=== All agents ready ===');
+  if (!SILENT_MODE) console.log('=== All agents ready ===');
 }
 
 const originalSendResponse = async function(text, emotionAfter) {
@@ -46,7 +52,7 @@ const originalSendResponse = async function(text, emotionAfter) {
     timestamp: new Date().toISOString()
   });
   
-  console.log(`  ${this.name}: ${text}`);
+  if (!SILENT_MODE) console.log(`  ${this.name}: ${text}`);
   
   if (emotionAfter) {
     await this.mm.updateSelf('mood', emotionAfter);
@@ -88,7 +94,7 @@ app.post('/chat', async (req, res) => {
   }
   
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] POST /chat - ${username}: ${message}`);
+  if (!SILENT_MODE) console.log(`[${timestamp}] POST /chat - ${username}: ${message}`);
   
   const userMessage = {
     author: username,
@@ -124,7 +130,7 @@ app.post('/chat', async (req, res) => {
     proactiveQueue = [];
   }
   
-  console.log(`[${timestamp}] Response: ${responses.length} agents responded`);
+  if (!SILENT_MODE) console.log(`[${timestamp}] Response: ${responses.length} agents responded`);
   
   res.json({ responses });
 });

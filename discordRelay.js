@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, WebhookClient } = require('discord.js');
+const { Client, GatewayIntentBits, WebhookClient, DiscordAPIError } = require('discord.js');
 const axios = require('axios');
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -21,6 +21,7 @@ const AGENT_WEBHOOKS = {
 };
 
 let webhookClients = {};
+let webhookIds = {};
 
 const client = new Client({
   intents: [
@@ -31,76 +32,91 @@ const client = new Client({
 });
 
 async function createOrGetWebhooks(channel) {
-  console.log('Setting up webhooks for agents...');
+  console.log('⚙️ Setting up webhooks...');
   
-  const existingWebhooks = await channel.fetchWebhooks();
-  
-  for (const [agentName, config] of Object.entries(AGENT_WEBHOOKS)) {
-    let webhook = existingWebhooks.find(w => w.name === config.name);
+  try {
+    const existingWebhooks = await channel.fetchWebhooks().catch(() => []);
     
-    if (!webhook) {
-      console.log(`Creating webhook for ${agentName}...`);
-      webhook = await channel.createWebhook({
-        name: config.name,
-        avatar: config.avatar
-      });
-    } else {
-      console.log(`Found existing webhook for ${agentName}`);
+    for (const [agentName, config] of Object.entries(AGENT_WEBHOOKS)) {
+      let webhook = existingWebhooks.find(w => w.name === config.name);
+      
+      if (!webhook) {
+        console.log(`➕ Creating webhook for ${agentName}...`);
+        webhook = await channel.createWebhook({
+          name: config.name,
+          avatar: config.avatar
+        });
+      }
+      
+      webhookClients[agentName] = new WebhookClient({ id: webhook.id, token: webhook.token });
+      webhookIds[agentName] = webhook.id;
+      console.log(`✅ Webhook ready for ${agentName}`);
     }
     
-    webhookClients[agentName] = new WebhookClient({
-      url: webhook.url
-    });
+    console.log('✅ All webhooks ready!');
+  } catch (error) {
+    console.error('❌ Webhook setup error:', error.message);
+  }
+}
+
+async function sendToWebhook(agentName, text) {
+  if (!webhookClients[agentName]) {
+    console.log(`❌ No webhook for ${agentName}`);
+    return false;
   }
   
-  console.log('All webhooks ready!');
+  try {
+    await webhookClients[agentName].send({
+      content: text,
+      username: AGENT_WEBHOOKS[agentName].name,
+      avatarURL: AGENT_WEBHOOKS[agentName].avatar
+    });
+    console.log(`📤 Posted ${agentName}: ${text.substring(0, 40)}...`);
+    return true;
+  } catch (error) {
+    console.error(`❌ Failed to post ${agentName}:`, error.message);
+    return false;
+  }
 }
 
 async function forwardToAgents(message) {
   const username = message.author.username;
   const content = message.content;
   
-  console.log(`[${new Date().toISOString()}] Forwarding to agents: ${username}: ${content}`);
+  console.log(`📥 ${username}: ${content}`);
   
   try {
     const response = await axios.post(`${AGENT_API_URL}/chat`, {
       message: content,
       username: username
-    }, { timeout: 20000 });
+    }, { timeout: 25000 });
     
     const responses = response.data.responses || [];
     
     if (responses.length === 0) {
-      console.log('No agent responses');
+      console.log('⚠️ No responses from agents');
       return;
     }
     
-    console.log(`Got ${responses.length} agent responses`);
+    console.log(`📬 Got ${responses.length} responses`);
     
+    let delay = 0;
     for (const resp of responses) {
       const agentName = resp.agent;
       const messages = resp.messages;
       const isProactive = resp.proactive;
       
-      if (!webhookClients[agentName]) {
-        console.log(`No webhook for ${agentName}`);
-        continue;
-      }
+      const msgText = messages.join(' ');
       
-      const delay = isProactive ? 2000 : 0;
-      setTimeout(async () => {
-        const msgText = messages.join(' ');
-        await webhookClients[agentName].send({
-          content: msgText,
-          username: AGENT_WEBHOOKS[agentName].name,
-          avatarURL: AGENT_WEBHOOKS[agentName].avatar
-        });
-        console.log(`Posted response from ${agentName}: ${msgText.substring(0, 50)}...`);
+      setTimeout(() => {
+        sendToWebhook(agentName, msgText);
       }, delay);
+      
+      delay += 800;
     }
     
   } catch (error) {
-    console.error('Error forwarding to agents:', error.message);
+    console.error('❌ Error:', error.message);
   }
 }
 
@@ -112,38 +128,31 @@ async function pollPendingMessages() {
     for (const resp of pending) {
       const agentName = resp.agent;
       const messages = resp.messages;
-      
-      if (!webhookClients[agentName]) continue;
-      
       const msgText = messages.join(' ');
-      await webhookClients[agentName].send({
-        content: msgText,
-        username: AGENT_WEBHOOKS[agentName].name,
-        avatarURL: AGENT_WEBHOOKS[agentName].avatar
-      });
-      console.log(`[Proactive] Posted from ${agentName}: ${msgText.substring(0, 50)}...`);
+      
+      sendToWebhook(agentName, msgText);
     }
   } catch (error) {
-    // Ignore polling errors
+    // Silent fail on polling
   }
 }
 
 client.once('ready', async () => {
-  console.log(`Discord bot logged in as ${client.user.tag}`);
+  console.log(`🤖 Logged in as ${client.user.tag}`);
   
   const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
   if (!channel) {
-    console.error('Channel not found!');
+    console.error('❌ Channel not found!');
     return;
   }
   
-  console.log(`Monitoring channel: ${channel.name}`);
+  console.log(`📢 Monitoring: #${channel.name}`);
   
   await createOrGetWebhooks(channel);
   
   setInterval(pollPendingMessages, 5000);
   
-  console.log('Discord relay online!');
+  console.log('🚀 Discord relay online!');
 });
 
 client.on('messageCreate', async (message) => {
@@ -151,6 +160,7 @@ client.on('messageCreate', async (message) => {
   if (message.webhookId) return;
   
   if (!HUMAN_USERNAMES.includes(message.author.username)) {
+    console.log(`👤 Ignoring ${message.author.username} (not in human list)`);
     return;
   }
   
@@ -158,13 +168,13 @@ client.on('messageCreate', async (message) => {
 });
 
 client.on('error', (error) => {
-  console.error('Discord client error:', error);
+  console.error('❌ Discord error:', error.message);
 });
 
 client.login(DISCORD_BOT_TOKEN);
 
 process.on('SIGINT', () => {
-  console.log('Shutting down Discord relay...');
+  console.log('👋 Shutting down...');
   client.destroy();
   process.exit(0);
 });
