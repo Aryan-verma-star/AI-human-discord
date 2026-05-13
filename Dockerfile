@@ -1,22 +1,16 @@
-FROM node:18-alpine
+FROM node:18-slim
 
 WORKDIR /app
 
-# Install git and curl
-RUN apk add --no-cache git curl
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
-# Clone the repository
-RUN git clone https://github.com/Aryan-verma-star/AI-human-discord.git /app/code
-WORKDIR /app/code
+RUN git clone https://github.com/Aryan-verma-star/AI-human-discord.git .
 
-# Install dependencies
-RUN npm install
+RUN npm install --production
 
-# Copy .env.example to .env for setup (user must fill in actual values)
-RUN cp .env.example .env
+ENV PORT=3000
+ENV AGENT_TIMEOUT=20
 
-# Expose port
 EXPOSE 3000
 
-# Default command - run the HTTP server
-CMD ["npm", "run", "server"]
+CMD ["node", "server.js"]
