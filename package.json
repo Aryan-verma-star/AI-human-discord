@@ -1,0 +1,19 @@
+{
+  "name": "kiara-agent",
+  "version": "0.1.0",
+  "description": "Phase 0 - Kiara, a Hinglish AI agent with Qwen brain and Karpathy-style wiki memory",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Run manual tests with: node index.js\""
+  },
+  "keywords": ["ai", "agent", "hinglish", "qwen", "chatbot"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.16.0",
+    "chalk": "^4.1.2",
+    "dotenv": "^17.4.2",
+    "fs-extra": "^11.3.5"
+  }
+}

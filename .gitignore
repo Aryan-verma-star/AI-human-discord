@@ -1,0 +1,4 @@
+node_modules/
+.env
+agents/*/raw/*.md
+agents/*/wiki/synthesis.md
